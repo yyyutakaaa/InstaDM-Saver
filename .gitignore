@@ -1,0 +1,34 @@
+# Python virtual environments
+venv/
+.venv/
+
+# PyInstaller build output
+build/
+dist/
+*.spec
+build.log
+
+# __pycache__ en gecompileerde bestanden
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# VSCode settings (optioneel, handig als je met VSCode werkt)
+.vscode/
+
+# IDE/project junk
+*.swp
+*.swo
+*.bak
+
+# OS/system files
+.DS_Store
+Thumbs.db
+
+# Secret config (optioneel, als je lokaal tokens/tests hebt)
+.env
+*.env
+
+# Windows batch build file, als die niet op GitHub hoeft (optioneel)
+build_exe.bat

@@ -1,3 +1,5 @@
+customtkinter
 python-dotenv
 rich
-instagrapi 
+instagrapi
+pillow

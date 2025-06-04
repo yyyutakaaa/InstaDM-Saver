@@ -89,21 +89,25 @@ def save_credentials(username: str, password: str) -> None:
     console.print("[green]Credentials saved.[/green]")
 
 def login_to_instagram() -> Client:
-    """Log in to Instagram and return a client."""
+    """Log in to Instagram and return a client using a single persistent session."""
     client = Client()
-    
+
+    credentials = load_credentials()
+
     if SESSION_FILE.exists():
         try:
             console.print("Attempting to load saved session...")
             client.load_settings(SESSION_FILE)
-            client.get_timeline_feed()  # Test if session is valid
+            # Calling login with stored credentials will reuse the session
+            if credentials.get("username") and credentials.get("password"):
+                client.login(credentials["username"], credentials["password"])
+            else:
+                client.get_timeline_feed()  # Fallback check
             console.print("[green]Successfully loaded session.[/green]")
             return client
         except Exception as e:
-            console.print(f"[yellow]Failed to load session: {str(e)}[/yellow]")
-    
-    credentials = load_credentials()
-    
+            console.print(f"[yellow]Failed to load saved session: {str(e)}[/yellow]")
+
     if not credentials:
         console.print("No saved credentials found.")
         username = Prompt.ask("Enter your Instagram username")
@@ -112,7 +116,7 @@ def login_to_instagram() -> Client:
         username = credentials.get("username")
         password = credentials.get("password")
         console.print(f"Using saved credentials for [bold]{username}[/bold]")
-    
+
     try:
         with Progress() as progress:
             task = progress.add_task("[cyan]Logging in to Instagram...", total=1)

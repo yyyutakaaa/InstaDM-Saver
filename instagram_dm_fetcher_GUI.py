@@ -154,18 +154,19 @@ class InstagramDMFetcherGUI:
         thread = threading.Thread(target=self._login_thread, args=(username, password))
         thread.daemon = True
         thread.start()
-    
+
     def _login_thread(self, username, password):
         """Login thread to avoid freezing UI."""
         try:
             # Try to load existing session first
             from instagram_dm_fetcher import Client, SESSION_FILE
             self.client = Client()
-            
+
             if SESSION_FILE.exists():
                 try:
                     self.client.load_settings(SESSION_FILE)
-                    self.client.get_timeline_feed()
+                    # Reuse session by calling login with stored credentials
+                    self.client.login(username, password)
                     self.root.after(0, self.login_success)
                     return
                 except:

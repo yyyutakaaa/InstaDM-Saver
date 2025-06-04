@@ -9,9 +9,17 @@ import json
 
 # Import all functions from the original script
 from instagram_dm_fetcher import (
-    login_to_instagram, get_conversations, fetch_messages,
-    save_messages_to_file, load_config, save_config,
-    setup_config_dir, CONFIG_DIR, DEFAULT_SAVE_DIR
+    login_to_instagram,
+    get_conversations,
+    fetch_messages,
+    save_messages_to_file,
+    load_config,
+    save_config,
+    setup_config_dir,
+    CONFIG_DIR,
+    DEFAULT_SAVE_DIR,
+    SESSION_FILE,
+    CREDENTIALS_FILE,
 )
 
 # Configure CustomTkinter
@@ -662,6 +670,20 @@ class InstagramDMFetcherGUI:
     def logout(self):
         """Handle logout."""
         if messagebox.askyesno("Logout", "Are you sure you want to logout?"):
+            # Remove saved session so the next launch requires login again
+            try:
+                if SESSION_FILE.exists():
+                    SESSION_FILE.unlink()
+            except Exception as e:
+                messagebox.showwarning("Warning", f"Failed to remove session file: {e}")
+
+            # Remove stored credentials if present
+            try:
+                if CREDENTIALS_FILE.exists():
+                    CREDENTIALS_FILE.unlink()
+            except Exception as e:
+                messagebox.showwarning("Warning", f"Failed to remove credentials file: {e}")
+
             self.client = None
             self.threads = []
             self.current_thread = None

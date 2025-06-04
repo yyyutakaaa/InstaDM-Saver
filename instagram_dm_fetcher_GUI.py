@@ -41,7 +41,7 @@ class LoadingSpinner(ctk.CTkFrame):
             height=size,
             highlightthickness=0,
             bd=0,
-            bg=self.cget("fg_color"),
+            bg="black",
         )
         self.canvas.pack()
         self.label = ctk.CTkLabel(self, text=text, font=ctk.CTkFont(size=14))

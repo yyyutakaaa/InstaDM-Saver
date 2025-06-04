@@ -26,6 +26,55 @@ from instagram_dm_fetcher import (
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+
+class LoadingSpinner(ctk.CTkFrame):
+    """Simple animated loading spinner."""
+
+    def __init__(self, master, size=40, line_width=4, text="Loading..."):
+        super().__init__(master, fg_color="transparent")
+        self.size = size
+        self.line_width = line_width
+
+        self.canvas = tk.Canvas(
+            self,
+            width=size,
+            height=size,
+            highlightthickness=0,
+            bd=0,
+            bg=self.cget("fg_color"),
+        )
+        self.canvas.pack()
+        self.label = ctk.CTkLabel(self, text=text, font=ctk.CTkFont(size=14))
+        self.label.pack(pady=(5, 0))
+
+        self.angle = 0
+        self.arc = self.canvas.create_arc(
+            2,
+            2,
+            size - 2,
+            size - 2,
+            start=self.angle,
+            extent=300,
+            style="arc",
+            outline="white",
+            width=line_width,
+        )
+        self.job = None
+
+    def _animate(self):
+        self.angle = (self.angle + 10) % 360
+        self.canvas.itemconfigure(self.arc, start=self.angle)
+        self.job = self.after(50, self._animate)
+
+    def start(self):
+        if not self.job:
+            self._animate()
+
+    def stop(self):
+        if self.job:
+            self.after_cancel(self.job)
+            self.job = None
+
 class InstagramDMFetcherGUI:
     def __init__(self):
         self.root = ctk.CTk()
@@ -119,8 +168,8 @@ class InstagramDMFetcherGUI:
         )
         self.login_button.pack(pady=20)
         
-        # Progress bar (hidden by default)
-        self.login_progress = ctk.CTkProgressBar(login_frame, width=300)
+        # Loading spinner (hidden by default)
+        self.login_spinner = LoadingSpinner(login_frame)
         
         # Load saved credentials if available
         self.load_saved_credentials()
@@ -147,8 +196,8 @@ class InstagramDMFetcherGUI:
         
         # Show progress
         self.login_button.configure(state="disabled", text="Logging in...")
-        self.login_progress.pack(pady=10)
-        self.login_progress.start()
+        self.login_spinner.pack(pady=10)
+        self.login_spinner.start()
         
         # Run login in separate thread
         thread = threading.Thread(target=self._login_thread, args=(username, password))
@@ -188,8 +237,8 @@ class InstagramDMFetcherGUI:
     
     def show_2fa_input(self):
         """Show 2FA input field."""
-        self.login_progress.stop()
-        self.login_progress.pack_forget()
+        self.login_spinner.stop()
+        self.login_spinner.pack_forget()
         self.twofa_frame.pack(pady=10)
         self.login_button.configure(
             state="normal", 
@@ -208,8 +257,8 @@ class InstagramDMFetcherGUI:
         password = self.password_entry.get()
         
         self.login_button.configure(state="disabled", text="Verifying...")
-        self.login_progress.pack(pady=10)
-        self.login_progress.start()
+        self.login_spinner.pack(pady=10)
+        self.login_spinner.start()
         
         thread = threading.Thread(
             target=self._verify_2fa_thread, 
@@ -229,8 +278,8 @@ class InstagramDMFetcherGUI:
     
     def login_error(self, error_msg):
         """Handle login error."""
-        self.login_progress.stop()
-        self.login_progress.pack_forget()
+        self.login_spinner.stop()
+        self.login_spinner.pack_forget()
         self.login_button.configure(state="normal", text="Login")
         messagebox.showerror("Login Failed", f"Error: {error_msg}")
     
@@ -317,13 +366,10 @@ class InstagramDMFetcherGUI:
     
     def load_conversations(self):
         """Load conversations in background."""
-        # Show loading
-        loading_label = ctk.CTkLabel(
-            self.conv_scroll,
-            text="Loading conversations...",
-            font=ctk.CTkFont(size=14)
-        )
-        loading_label.pack(pady=20)
+        # Show loading spinner
+        spinner = LoadingSpinner(self.conv_scroll)
+        spinner.pack(pady=20)
+        spinner.start()
         
         thread = threading.Thread(target=self._load_conversations_thread)
         thread.daemon = True
@@ -485,16 +531,9 @@ class InstagramDMFetcherGUI:
         for widget in self.msg_scroll.winfo_children():
             widget.destroy()
         
-        loading_label = ctk.CTkLabel(
-            self.msg_scroll,
-            text=f"Fetching {count} messages...",
-            font=ctk.CTkFont(size=14)
-        )
-        loading_label.pack(pady=50)
-        
-        progress = ctk.CTkProgressBar(self.msg_scroll, width=300)
-        progress.pack(pady=10)
-        progress.start()
+        spinner = LoadingSpinner(self.msg_scroll)
+        spinner.pack(pady=50)
+        spinner.start()
         
         thread = threading.Thread(target=self._fetch_messages_thread, args=(count,))
         thread.daemon = True

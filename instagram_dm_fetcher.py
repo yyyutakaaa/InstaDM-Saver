@@ -12,6 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 from instagrapi import Client
 from instagrapi.types import UserShort, DirectThread, DirectMessage
+import keyring
 
 # Initialize Rich console for better output
 console = Console()
@@ -23,6 +24,7 @@ SESSION_FILE = CONFIG_DIR / "session.json"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_MESSAGE_COUNT = 1000
 DEFAULT_SAVE_DIR = Path.home() / "Instagram_DM_Fetcher_Chats"
+KEYRING_SERVICE = "instagram_dm_fetcher"
 
 def load_config() -> Dict[str, str]:
     """Load configuration settings."""
@@ -35,7 +37,10 @@ def load_config() -> Dict[str, str]:
             console.print("[yellow]Config file is invalid.[/yellow]")
     
     # Default configuration
-    return {"save_dir": str(DEFAULT_SAVE_DIR)}
+    return {
+        "save_dir": str(DEFAULT_SAVE_DIR),
+        "credential_storage": "keyring"  # Default to keyring
+    }
 
 def save_config(config: Dict[str, str]) -> None:
     """Save configuration settings."""
@@ -63,15 +68,48 @@ def setup_config_dir() -> None:
             DEFAULT_SAVE_DIR.mkdir(parents=True, exist_ok=True)
             save_config(config)
 
-def load_credentials() -> Dict[str, str]:
-    """Load saved credentials from file or .env."""
-    load_dotenv()
-    username = os.getenv("IG_USERNAME")
-    password = os.getenv("IG_PASSWORD")
-    
-    if username and password:
-        return {"username": username, "password": password}
-    
+def save_credentials_keyring(username: str, password: str) -> bool:
+    """Save credentials to system keyring."""
+    try:
+        keyring.set_password(KEYRING_SERVICE, username, password)
+        console.print("[green]Credentials saved securely to system keyring.[/green]")
+        return True
+    except Exception as e:
+        console.print(f"[yellow]Could not save to keyring: {e}[/yellow]")
+        return False
+
+def load_credentials_keyring(username: str) -> Optional[str]:
+    """Load password from system keyring."""
+    try:
+        password = keyring.get_password(KEYRING_SERVICE, username)
+        return password
+    except Exception as e:
+        console.print(f"[yellow]Could not load from keyring: {e}[/yellow]")
+        return None
+
+def delete_credentials_keyring(username: str) -> bool:
+    """Delete credentials from system keyring."""
+    try:
+        keyring.delete_password(KEYRING_SERVICE, username)
+        console.print("[green]Credentials removed from keyring.[/green]")
+        return True
+    except Exception as e:
+        console.print(f"[yellow]Could not delete from keyring: {e}[/yellow]")
+        return False
+
+def save_credentials_file(username: str, password: str) -> bool:
+    """Save credentials to file (legacy fallback)."""
+    try:
+        with open(CREDENTIALS_FILE, "w") as f:
+            json.dump({"username": username, "password": password}, f)
+        console.print("[green]Credentials saved to file.[/green]")
+        return True
+    except Exception as e:
+        console.print(f"[yellow]Could not save to file: {e}[/yellow]")
+        return False
+
+def load_credentials_file() -> Dict[str, str]:
+    """Load credentials from file (legacy fallback)."""
     if CREDENTIALS_FILE.exists():
         try:
             with open(CREDENTIALS_FILE, "r") as f:
@@ -79,14 +117,159 @@ def load_credentials() -> Dict[str, str]:
                 return credentials
         except (json.JSONDecodeError, KeyError):
             console.print("[yellow]Credentials file is invalid.[/yellow]")
+    return {}
+
+def get_credential_storage_method() -> str:
+    """Let user choose credential storage method."""
+    methods = {
+        "1": "System Keyring (Recommended)",
+        "2": "File Storage (Less Secure)",
+        "3": "Environment Variables Only",
+        "4": "No Storage (Always Ask)"
+    }
+    
+    console.print("\n[bold]Choose credential storage method:[/bold]")
+    for key, value in methods.items():
+        console.print(f"{key}. {value}")
+    
+    choice = Prompt.ask("Select method", choices=list(methods.keys()), default="1")
+    return choice
+
+def save_credentials(username: str, password: str) -> None:
+    """Save credentials using configured method."""
+    config = load_config()
+    storage_method = config.get("credential_storage", "keyring")
+    
+    if storage_method == "keyring":
+        success = save_credentials_keyring(username, password)
+        if not success:
+            console.print("[yellow]Keyring failed, trying file storage as fallback...[/yellow]")
+            save_credentials_file(username, password)
+    elif storage_method == "file":
+        save_credentials_file(username, password)
+    elif storage_method == "env":
+        console.print("[yellow]Set IG_USERNAME and IG_PASSWORD environment variables.[/yellow]")
+    else:
+        console.print("[yellow]Credentials will not be saved.[/yellow]")
+
+def load_credentials() -> Dict[str, str]:
+    """Load saved credentials using configured method."""
+    # First check environment variables
+    load_dotenv()
+    username = os.getenv("IG_USERNAME")
+    password = os.getenv("IG_PASSWORD")
+    
+    if username and password:
+        return {"username": username, "password": password}
+    
+    config = load_config()
+    storage_method = config.get("credential_storage", "keyring")
+    
+    if storage_method == "keyring":
+        # Try to load from keyring
+        if username:  # We have username from env, try to get password from keyring
+            password = load_credentials_keyring(username)
+            if password:
+                return {"username": username, "password": password}
+        
+        # Check if we have any saved usernames in keyring
+        # We'll need to check file storage for username or ask user
+        file_creds = load_credentials_file()
+        if file_creds.get("username"):
+            username = file_creds["username"]
+            password = load_credentials_keyring(username)
+            if password:
+                return {"username": username, "password": password}
+    
+    elif storage_method == "file":
+        return load_credentials_file()
     
     return {}
 
-def save_credentials(username: str, password: str) -> None:
-    """Save credentials to file."""
-    with open(CREDENTIALS_FILE, "w") as f:
-        json.dump({"username": username, "password": password}, f)
-    console.print("[green]Credentials saved.[/green]")
+def configure_credentials():
+    """Configure credential storage method."""
+    config = load_config()
+    current_method = config.get("credential_storage", "keyring")
+    
+    method_names = {
+        "keyring": "System Keyring",
+        "file": "File Storage",
+        "env": "Environment Variables Only",
+        "none": "No Storage"
+    }
+    
+    console.print(f"Current method: [cyan]{method_names.get(current_method, 'Unknown')}[/cyan]")
+    
+    if Confirm.ask("Do you want to change the credential storage method?"):
+        choice = get_credential_storage_method()
+        
+        method_mapping = {
+            "1": "keyring",
+            "2": "file", 
+            "3": "env",
+            "4": "none"
+        }
+        
+        new_method = method_mapping[choice]
+        config["credential_storage"] = new_method
+        save_config(config)
+        
+        console.print(f"[green]Credential storage method updated to: {method_names[new_method]}[/green]")
+        
+        # If switching from file to keyring, offer to migrate
+        if current_method == "file" and new_method == "keyring":
+            if Confirm.ask("Do you want to migrate existing file credentials to keyring?"):
+                file_creds = load_credentials_file()
+                if file_creds.get("username") and file_creds.get("password"):
+                    if save_credentials_keyring(file_creds["username"], file_creds["password"]):
+                        if Confirm.ask("Migration successful! Delete the old credentials file?"):
+                            try:
+                                CREDENTIALS_FILE.unlink()
+                                console.print("[green]Old credentials file deleted.[/green]")
+                            except Exception as e:
+                                console.print(f"[yellow]Could not delete old file: {e}[/yellow]")
+        
+        # If switching from keyring to file, warn about security
+        elif current_method == "keyring" and new_method == "file":
+            console.print("[yellow]Warning: File storage is less secure than keyring.[/yellow]")
+
+def manage_saved_credentials():
+    """Manage saved credentials."""
+    config = load_config()
+    storage_method = config.get("credential_storage", "keyring")
+    
+    if storage_method == "keyring":
+        # Try to find saved credentials
+        file_creds = load_credentials_file()
+        if file_creds.get("username"):
+            username = file_creds["username"]
+            if load_credentials_keyring(username):
+                console.print(f"Found saved credentials for: [cyan]{username}[/cyan]")
+                if Confirm.ask("Do you want to delete these credentials?"):
+                    delete_credentials_keyring(username)
+            else:
+                console.print("No credentials found in keyring.")
+        else:
+            console.print("No saved credentials found.")
+    
+    elif storage_method == "file":
+        if CREDENTIALS_FILE.exists():
+            creds = load_credentials_file()
+            if creds.get("username"):
+                console.print(f"Found saved credentials for: [cyan]{creds['username']}[/cyan]")
+                if Confirm.ask("Do you want to delete these credentials?"):
+                    try:
+                        CREDENTIALS_FILE.unlink()
+                        console.print("[green]Credentials file deleted.[/green]")
+                    except Exception as e:
+                        console.print(f"[red]Could not delete file: {e}[/red]")
+            else:
+                console.print("Credentials file is invalid.")
+        else:
+            console.print("No credentials file found.")
+    
+    else:
+        console.print("No credentials are saved with the current storage method.")
 
 def login_to_instagram() -> Client:
     """Log in to Instagram and return a client using a single persistent session."""
@@ -135,8 +318,9 @@ def login_to_instagram() -> Client:
         console.print("[green]Login successful![/green]")
         
         client.dump_settings(SESSION_FILE)
-        if Confirm.ask("Save credentials for future use?"):
-            save_credentials(username, password)
+        if not credentials:  # Only ask if we didn't have saved credentials
+            if Confirm.ask("Save credentials for future use?"):
+                save_credentials(username, password)
         
         return client
     except Exception as e:
@@ -382,7 +566,9 @@ def main() -> None:
         choices = [
             "1. Fetch direct messages",
             "2. Configure save directory",
-            "3. Exit"
+            "3. Configure credential storage",
+            "4. Manage saved credentials",
+            "5. Exit"
         ]
         
         while True:
@@ -390,7 +576,7 @@ def main() -> None:
             for choice in choices:
                 console.print(choice)
             
-            option = Prompt.ask("\nSelect an option", choices=["1", "2", "3"], default="1")
+            option = Prompt.ask("\nSelect an option", choices=["1", "2", "3", "4", "5"], default="1")
             
             if option == "1":
                 # Original flow to fetch messages
@@ -428,6 +614,14 @@ def main() -> None:
                 configure_save_directory()
             
             elif option == "3":
+                # Configure credential storage
+                configure_credentials()
+            
+            elif option == "4":
+                # Manage saved credentials
+                manage_saved_credentials()
+            
+            elif option == "5":
                 # Exit
                 break
         
@@ -446,4 +640,4 @@ if __name__ == "__main__":
         console.print(f"[bold red]Critical error: {str(e)}[/bold red]")
         console.print_exception()
         # Keep console open on critical error
-        input("\nPress Enter to exit...") 
+        input("\nPress Enter to exit...")

@@ -3,3 +3,4 @@ python-dotenv
 rich
 instagrapi
 pillow
+keyring

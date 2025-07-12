@@ -1,6 +1,7 @@
 import os
 import json
 import getpass
+import csv
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -39,7 +40,7 @@ def load_config() -> Dict[str, str]:
     # Default configuration
     return {
         "save_dir": str(DEFAULT_SAVE_DIR),
-        "credential_storage": "keyring"  # Default to keyring
+        "credential_storage": "keyring"
     }
 
 def save_config(config: Dict[str, str]) -> None:
@@ -173,7 +174,6 @@ def load_credentials() -> Dict[str, str]:
                 return {"username": username, "password": password}
         
         # Check if we have any saved usernames in keyring
-        # We'll need to check file storage for username or ask user
         file_creds = load_credentials_file()
         if file_creds.get("username"):
             username = file_creds["username"]
@@ -327,14 +327,226 @@ def login_to_instagram() -> Client:
         console.print(f"[red]Login failed: {str(e)}[/red]")
         raise
 
+def clean_media_item(item: dict) -> Optional[dict]:
+    """Clean problematic media data from a message item."""
+    if not isinstance(item, dict):
+        return item
+    
+    try:
+        import copy
+        cleaned_item = copy.deepcopy(item)
+        
+        # Handle clips/reels which are causing validation errors
+        if "clip" in cleaned_item:
+            clip_data = cleaned_item["clip"]
+            
+            # Handle nested clip structure
+            if isinstance(clip_data, dict) and "clip" in clip_data:
+                clip_data = clip_data["clip"]
+            
+            if isinstance(clip_data, dict) and "clips_metadata" in clip_data:
+                clips_metadata = clip_data["clips_metadata"]
+                
+                if isinstance(clips_metadata, dict):
+                    # Fix the original_sound_info validation error
+                    if "original_sound_info" in clips_metadata:
+                        original_sound = clips_metadata["original_sound_info"]
+                        
+                        # If it's None or invalid, provide a default structure
+                        if original_sound is None or not isinstance(original_sound, dict):
+                            clips_metadata["original_sound_info"] = {
+                                "audio_id": "",
+                                "original_audio_title": "",
+                                "progressive_download_url": "",
+                                "dash_manifest": "",
+                                "ig_artist": {"username": "", "pk": 0},
+                                "duration_in_ms": 0,
+                                "is_explicit": False
+                            }
+                        else:
+                            # Ensure required fields exist
+                            required_fields = {
+                                "audio_id": "",
+                                "original_audio_title": "",
+                                "progressive_download_url": "",
+                                "dash_manifest": "",
+                                "duration_in_ms": 0,
+                                "is_explicit": False
+                            }
+                            
+                            for field, default in required_fields.items():
+                                if field not in original_sound:
+                                    original_sound[field] = default
+                            
+                            # Ensure ig_artist has correct structure
+                            if "ig_artist" not in original_sound or not isinstance(original_sound["ig_artist"], dict):
+                                original_sound["ig_artist"] = {"username": "", "pk": 0}
+                            else:
+                                if "username" not in original_sound["ig_artist"]:
+                                    original_sound["ig_artist"]["username"] = ""
+                                if "pk" not in original_sound["ig_artist"]:
+                                    original_sound["ig_artist"]["pk"] = 0
+                    
+                    # Clean other potentially problematic fields
+                    problematic_fields = ["music_info", "template_info"]
+                    for field in problematic_fields:
+                        if field in clips_metadata and clips_metadata[field] is None:
+                            del clips_metadata[field]
+        
+        # Clean other media types that might cause issues
+        media_fields_to_clean = ["media", "video", "photo"]
+        for field in media_fields_to_clean:
+            if field in cleaned_item and cleaned_item[field]:
+                media_data = cleaned_item[field]
+                if isinstance(media_data, dict):
+                    # Remove fields that commonly cause validation errors
+                    fields_to_remove = ["clips_metadata", "original_sound_info"]
+                    for remove_field in fields_to_remove:
+                        if remove_field in media_data:
+                            del media_data[remove_field]
+        
+        return cleaned_item
+        
+    except Exception as e:
+        # If cleaning fails, return None to skip this item
+        console.print(f"[yellow]Skipping problematic media item: {str(e)[:50]}...[/yellow]")
+        return None
+
+def clean_thread_data(thread_data: dict) -> dict:
+    """Clean problematic data from thread information."""
+    if not isinstance(thread_data, dict):
+        return thread_data
+    
+    # Create a deep copy to avoid modifying original
+    import copy
+    cleaned = copy.deepcopy(thread_data)
+    
+    # Clean items (messages)
+    if "items" in cleaned and isinstance(cleaned["items"], list):
+        safe_items = []
+        for item in cleaned["items"]:
+            if isinstance(item, dict):
+                # Clean problematic media data
+                cleaned_item = clean_media_item(item)
+                if cleaned_item:  # Only add if cleaning succeeded
+                    safe_items.append(cleaned_item)
+        cleaned["items"] = safe_items[:20]  # Limit to first 20 items for safety
+    
+    return cleaned
+
+def get_conversations_safe_api(client: Client) -> List[DirectThread]:
+    """Use direct API calls with better error handling."""
+    try:
+        # Use the private request method to get raw inbox data
+        result = client.private_request("direct_v2/inbox/", params={"visual_message_return_type": "unseen"})
+        
+        if not result or "inbox" not in result:
+            raise Exception("Invalid inbox response from Instagram API")
+        
+        inbox = result["inbox"]
+        threads_data = inbox.get("threads", [])
+        
+        if not threads_data:
+            console.print("[yellow]No conversations found in inbox.[/yellow]")
+            return []
+        
+        console.print(f"[cyan]Processing {len(threads_data)} conversations...[/cyan]")
+        
+        safe_threads = []
+        skipped_count = 0
+        
+        for i, thread_data in enumerate(threads_data):
+            try:
+                # Clean the thread data before processing
+                cleaned_thread_data = clean_thread_data(thread_data)
+                
+                # Extract thread using instagrapi's extractor
+                from instagrapi.extractors import extract_direct_thread
+                thread = extract_direct_thread(cleaned_thread_data)
+                
+                safe_threads.append(thread)
+                
+            except Exception as thread_error:
+                skipped_count += 1
+                console.print(f"[yellow]Skipped thread {i+1}: {str(thread_error)[:50]}...[/yellow]")
+                continue
+        
+        if safe_threads:
+            console.print(f"[green]Successfully processed {len(safe_threads)} conversations.[/green]")
+            if skipped_count > 0:
+                console.print(f"[yellow]Skipped {skipped_count} problematic conversations.[/yellow]")
+            return safe_threads
+        else:
+            raise Exception("No safe conversations could be processed")
+            
+    except Exception as e:
+        console.print(f"[red]Safe API method failed: {str(e)[:100]}...[/red]")
+        raise
+
 def get_conversations(client: Client) -> List[DirectThread]:
-    """Get all conversations."""
+    """Get all conversations with enhanced error handling for problematic media."""
     with Progress() as progress:
         task = progress.add_task("[cyan]Fetching conversations...", total=1)
-        threads = client.direct_threads()
-        progress.update(task, advance=1)
-    
-    return threads
+        
+        try:
+            # Try the standard method first
+            threads = client.direct_threads(thread_message_limit=5)  # Limit messages to reduce issues
+            progress.update(task, advance=1)
+            return threads
+        except Exception as e:
+            progress.stop()
+            
+            # Check if it's a validation error related to media
+            error_str = str(e).lower()
+            is_media_error = any(keyword in error_str for keyword in [
+                "clips_metadata", "original_sound_info", "validationerror", 
+                "model_type", "input should be a valid dictionary"
+            ])
+            
+            if is_media_error:
+                console.print("[yellow]Encountered problematic media in conversations.[/yellow]")
+                console.print("[yellow]Trying enhanced error handling methods...[/yellow]")
+                
+                # Method 1: Try with very limited messages
+                try:
+                    console.print("[cyan]Method 1: Fetching with minimal message data...[/cyan]")
+                    threads = client.direct_threads(thread_message_limit=1)
+                    console.print("[green]Successfully fetched conversations with minimal data.[/green]")
+                    return threads
+                except Exception as e1:
+                    console.print(f"[yellow]Method 1 failed: {str(e1)[:50]}...[/yellow]")
+                
+                # Method 2: Try with no message preview
+                try:
+                    console.print("[cyan]Method 2: Fetching conversation list without messages...[/cyan]")
+                    threads = client.direct_threads(thread_message_limit=0)
+                    console.print("[green]Successfully fetched conversation list.[/green]")
+                    console.print("[yellow]Note: Message previews not available.[/yellow]")
+                    return threads
+                except Exception as e2:
+                    console.print(f"[yellow]Method 2 failed: {str(e2)[:50]}...[/yellow]")
+                
+                # Method 3: Use safe API calls
+                try:
+                    console.print("[cyan]Method 3: Using enhanced API method...[/cyan]")
+                    threads = get_conversations_safe_api(client)
+                    return threads
+                except Exception as e3:
+                    console.print(f"[yellow]Method 3 failed: {str(e3)[:50]}...[/yellow]")
+                
+                # If all methods fail, provide helpful error message
+                console.print("\n[bold red]Could not fetch conversations due to problematic media.[/bold red]")
+                console.print("[yellow]This is usually caused by Instagram Reels/clips with invalid metadata.[/yellow]")
+                console.print("\n[bold]Possible solutions:[/bold]")
+                console.print("1. Update instagrapi: [cyan]pip install --upgrade instagrapi[/cyan]")
+                console.print("2. Try again later (Instagram may have API issues)")
+                console.print("3. Clear problematic conversations from Instagram mobile app")
+                console.print("4. Report this issue to the instagrapi project on GitHub")
+                
+                raise Exception("All conversation fetching methods failed due to problematic media")
+            else:
+                # Different error, re-raise with original message
+                raise e
 
 def display_conversations(threads: List[DirectThread]) -> None:
     """Display all conversations in a table."""
@@ -346,9 +558,17 @@ def display_conversations(threads: List[DirectThread]) -> None:
     
     for i, thread in enumerate(threads, 1):
         users = ", ".join([user.username for user in thread.users])
-        if thread.messages and hasattr(thread.messages[0], 'text'):
-            last_msg = thread.messages[0].text if thread.messages[0].text is not None else "[No text content]"
-        else:
+        
+        # Safely get last message
+        last_msg = "[No text content]"
+        try:
+            if thread.messages and len(thread.messages) > 0:
+                first_msg = thread.messages[0]
+                if hasattr(first_msg, 'text') and first_msg.text:
+                    last_msg = first_msg.text
+                elif hasattr(first_msg, 'media') and first_msg.media:
+                    last_msg = "[Media message]"
+        except Exception:
             last_msg = "[No messages]"
         
         # Truncate long messages
@@ -401,19 +621,162 @@ def select_conversation(threads: List[DirectThread]) -> DirectThread:
             else:
                 console.print("[red]No conversations found matching that username.[/red]")
 
+def fetch_messages_safe_batch(client: Client, thread_id: str, count: int, batch_size: int = 20) -> List[DirectMessage]:
+    """Fetch messages in small, safe batches with aggressive error handling."""
+    all_messages = []
+    cursor = None
+    remaining = count
+    consecutive_failures = 0
+    max_consecutive_failures = 3
+    
+    while remaining > 0 and len(all_messages) < count and consecutive_failures < max_consecutive_failures:
+        current_batch_size = min(batch_size, remaining)
+        
+        try:
+            console.print(f"[cyan]Fetching batch of {current_batch_size} messages...[/cyan]")
+            
+            # Use the private API to get messages with better control
+            params = {
+                "limit": current_batch_size
+            }
+            if cursor:
+                params["cursor"] = cursor
+            
+            result = client.private_request(f"direct_v2/threads/{thread_id}/", params=params)
+            
+            if not result or "thread" not in result:
+                console.print("[yellow]No thread data in response.[/yellow]")
+                break
+            
+            thread_data = result["thread"]
+            items = thread_data.get("items", [])
+            
+            if not items:
+                console.print("[yellow]No more messages available.[/yellow]")
+                break
+            
+            # Process items safely
+            batch_messages = []
+            for item in items:
+                try:
+                    # Clean the item before processing
+                    cleaned_item = clean_media_item(item)
+                    if cleaned_item:
+                        # Extract message using instagrapi
+                        from instagrapi.extractors import extract_direct_message
+                        message = extract_direct_message(cleaned_item)
+                        batch_messages.append(message)
+                except Exception as msg_error:
+                    # Skip problematic individual messages
+                    console.print(f"[yellow]Skipped problematic message: {str(msg_error)[:30]}...[/yellow]")
+                    continue
+            
+            if batch_messages:
+                all_messages.extend(batch_messages)
+                remaining -= len(batch_messages)
+                cursor = items[-1].get("item_id")  # Get cursor for next batch
+                consecutive_failures = 0  # Reset failure counter
+                console.print(f"[green]Successfully fetched {len(batch_messages)} messages.[/green]")
+            else:
+                consecutive_failures += 1
+                console.print(f"[yellow]No valid messages in this batch. Attempt {consecutive_failures}/{max_consecutive_failures}[/yellow]")
+                
+                # Try smaller batch size on failure
+                if batch_size > 5:
+                    batch_size = max(5, batch_size // 2)
+                    console.print(f"[yellow]Reducing batch size to {batch_size}[/yellow]")
+                
+        except Exception as batch_error:
+            consecutive_failures += 1
+            console.print(f"[yellow]Batch failed ({consecutive_failures}/{max_consecutive_failures}): {str(batch_error)[:50]}...[/yellow]")
+            
+            # Try smaller batch size on failure
+            if batch_size > 5:
+                batch_size = max(5, batch_size // 2)
+                console.print(f"[yellow]Reducing batch size to {batch_size}[/yellow]")
+            
+            if consecutive_failures >= max_consecutive_failures:
+                console.print("[red]Too many consecutive failures, stopping batch fetch.[/red]")
+                break
+    
+    return all_messages
+
 def fetch_messages(client: Client, thread: DirectThread, count: int = DEFAULT_MESSAGE_COUNT) -> List[DirectMessage]:
-    """Fetch messages from a conversation."""
+    """Fetch messages from a conversation with enhanced error handling for problematic media."""
     with Progress() as progress:
         task = progress.add_task(f"[cyan]Fetching {count} messages...", total=1)
-        messages = client.direct_messages(thread.id, count)
-        progress.update(task, advance=1)
-    
-    return messages
+        
+        try:
+            # Try the standard method first with a small limit to test
+            test_messages = client.direct_messages(thread.id, min(10, count))
+            
+            # If test worked, try to get all requested messages
+            if test_messages:
+                if count <= 10:
+                    progress.update(task, advance=1)
+                    return test_messages
+                else:
+                    # Try to get more messages
+                    messages = client.direct_messages(thread.id, count)
+                    progress.update(task, advance=1)
+                    return messages
+            else:
+                raise Exception("No messages returned from test fetch")
+                
+        except Exception as e:
+            progress.stop()
+            
+            error_str = str(e).lower()
+            is_media_error = any(keyword in error_str for keyword in [
+                "clips_metadata", "original_sound_info", "validationerror",
+                "model_type", "input should be a valid dictionary", "unexpected keyword argument"
+            ])
+            
+            if is_media_error:
+                console.print("[yellow]Encountered problematic media in messages.[/yellow]")
+                console.print("[yellow]Trying safe batch fetching method...[/yellow]")
+                
+                try:
+                    messages = fetch_messages_safe_batch(client, thread.id, count, batch_size=20)
+                    
+                    if messages:
+                        console.print(f"[green]Successfully fetched {len(messages)} messages using safe method.[/green]")
+                        return messages
+                    else:
+                        console.print("[yellow]No messages could be retrieved safely.[/yellow]")
+                        return []
+                        
+                except Exception as safe_error:
+                    console.print(f"[red]Safe batch method failed: {str(safe_error)[:50]}...[/red]")
+                    
+                    # Last resort: try to get just a few recent messages
+                    try:
+                        console.print("[cyan]Attempting to fetch just the most recent messages...[/cyan]")
+                        recent_messages = client.direct_messages(thread.id, 5)
+                        if recent_messages:
+                            console.print(f"[green]Retrieved {len(recent_messages)} recent messages.[/green]")
+                            return recent_messages
+                        else:
+                            return []
+                    except Exception:
+                        console.print("[red]All message fetching methods failed.[/red]")
+                        return []
+            else:
+                # Different error, re-raise
+                raise e
 
-def display_messages(thread: DirectThread, messages: List[DirectMessage], client_user_id: int) -> None:
+def display_messages(thread: DirectThread, messages: List[DirectMessage], client: Client) -> None:
     """Display messages in a readable format."""
+    # Get the logged-in user's actual username
+    try:
+        current_user = client.user_info(client.user_id)
+        current_username = current_user.username
+    except:
+        # Fallback if we can't get the username
+        current_username = "You"
+    
     usernames = {user.pk: user.username for user in thread.users}
-    usernames[client_user_id] = "You"
+    usernames[client.user_id] = current_username
     
     sorted_messages = sorted(messages, key=lambda m: m.timestamp)
     
@@ -423,21 +786,62 @@ def display_messages(thread: DirectThread, messages: List[DirectMessage], client
         sender = usernames.get(msg.user_id, f"Unknown ({msg.user_id})")
         timestamp = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S")
         
-        if msg.user_id == client_user_id:
-            console.print(f"[cyan]{timestamp}[/cyan] [bold blue]{sender}:[/bold blue] {msg.text}")
+        # Handle None text gracefully
+        message_text = msg.text if msg.text is not None else "None"
+        
+        if msg.user_id == client.user_id:
+            console.print(f"[cyan]{timestamp}[/cyan] [bold blue]{sender}:[/bold blue] {message_text}")
         else:
-            console.print(f"[cyan]{timestamp}[/cyan] [bold green]{sender}:[/bold green] {msg.text}")
+            console.print(f"[cyan]{timestamp}[/cyan] [bold green]{sender}:[/bold green] {message_text}")
         
         # Display media if present
-        if msg.media and msg.media.media_type == 1:  # Image
-            console.print(f"[italic][Image: {msg.media.thumbnail_url}][/italic]")
-        elif msg.media and msg.media.media_type == 2:  # Video
-            console.print(f"[italic][Video: {msg.media.video_url}][/italic]")
+        try:
+            if hasattr(msg, 'media') and msg.media:
+                if hasattr(msg.media, 'media_type'):
+                    if msg.media.media_type == 1:  # Image
+                        thumbnail_url = getattr(msg.media, 'thumbnail_url', 'No URL available')
+                        console.print(f"[italic][Image: {thumbnail_url}][/italic]")
+                    elif msg.media.media_type == 2:  # Video
+                        video_url = getattr(msg.media, 'video_url', 'No URL available')
+                        console.print(f"[italic][Video: {video_url}][/italic]")
+                    else:
+                        console.print(f"[italic][Media: Type {msg.media.media_type}][/italic]")
+                else:
+                    console.print(f"[italic][Media attachment][/italic]")
+        except Exception as media_error:
+            console.print(f"[italic][Media - display error: {str(media_error)[:30]}...][/italic]")
 
-def save_messages_to_file(thread: DirectThread, messages: List[DirectMessage], client_user_id: int) -> str:
-    """Save messages to a file and return the filename."""
+def choose_file_format() -> str:
+    """Let user choose the file format for saving messages."""
+    formats = {
+        "1": "TXT - Plain text file (human readable)",
+        "2": "JSON - Structured data format",
+        "3": "CSV - Spreadsheet compatible format"
+    }
+    
+    console.print("\n[bold]Choose file format:[/bold]")
+    for key, value in formats.items():
+        console.print(f"{key}. {value}")
+    
+    choice = Prompt.ask("Select format", choices=list(formats.keys()), default="1")
+    
+    format_mapping = {
+        "1": "txt",
+        "2": "json", 
+        "3": "csv"
+    }
+    
+    return format_mapping[choice]
+
+def save_messages_to_file(thread: DirectThread, messages: List[DirectMessage], client: Client, file_format: str = None) -> str:
+    """Save messages to a file in specified format and return the filename."""
     import datetime
     import re
+    import csv
+    
+    # Choose format if not provided
+    if file_format is None:
+        file_format = choose_file_format()
     
     try:
         # Load save directory from config
@@ -469,57 +873,155 @@ def save_messages_to_file(thread: DirectThread, messages: List[DirectMessage], c
         else:
             current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             
-        filename = save_folder / f"{safe_username}_{current_time}.txt"
+        filename = save_folder / f"{safe_username}_{current_time}.{file_format}"
+        
+        # Get the logged-in user's actual username
+        try:
+            current_user = client.user_info(client.user_id)
+            current_username = current_user.username
+        except:
+            # Fallback if we can't get the username
+            current_username = "You"
         
         username_map = {user.pk: user.username for user in thread.users}
-        username_map[client_user_id] = "You"
+        username_map[client.user_id] = current_username
         
         sorted_messages = sorted(messages, key=lambda m: m.timestamp)
         
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(f"Conversation with {', '.join(usernames)}\n")
-            f.write("=" * 50 + "\n\n")
-            
-            current_date = None
+        if file_format == "txt":
+            # Original TXT format
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(f"Conversation with {', '.join(usernames)}\n")
+                f.write("=" * 50 + "\n\n")
+                
+                current_date = None
+                
+                for msg in sorted_messages:
+                    msg_date = msg.timestamp.date()
+                    if current_date != msg_date:
+                        if current_date is not None:
+                            f.write("\n")
+                        
+                        date_str = msg_date.strftime("%A, %B %d, %Y")
+                        f.write(f"\n――――― {date_str} ―――――\n\n")
+                        current_date = msg_date
+                    
+                    sender = username_map.get(msg.user_id, f"Unknown ({msg.user_id})")
+                    timestamp = msg.timestamp.strftime("%H:%M:%S")
+                    
+                    msg_text = msg.text if msg.text is not None else "[No text content]"
+                    f.write(f"{timestamp} - {sender}: {msg_text}\n")
+                    
+                    # Handle media safely
+                    try:
+                        if hasattr(msg, 'media') and msg.media and hasattr(msg.media, 'media_type'):
+                            if msg.media.media_type == 1:  # Image
+                                thumbnail_url = getattr(msg.media, 'thumbnail_url', 'No URL available')
+                                f.write(f"[Image: {thumbnail_url}]\n")
+                            elif msg.media.media_type == 2:  # Video
+                                video_url = getattr(msg.media, 'video_url', 'No URL available')
+                                f.write(f"[Video: {video_url}]\n")
+                    except Exception:
+                        f.write("[Media attachment - unable to display]\n")
+                    
+                    f.write("\n")
+        
+        elif file_format == "json":
+            # JSON format
+            messages_data = {
+                "conversation_info": {
+                    "participants": usernames,
+                    "export_time": datetime.datetime.now().isoformat(),
+                    "message_count": len(sorted_messages)
+                },
+                "messages": []
+            }
             
             for msg in sorted_messages:
-                msg_date = msg.timestamp.date()
-                if current_date != msg_date:
-                    if current_date is not None:
-                        f.write("\n")
-                    
-                    date_str = msg_date.strftime("%A, %B %d, %Y")
-                    f.write(f"\n――――― {date_str} ―――――\n\n")
-                    current_date = msg_date
-                
                 sender = username_map.get(msg.user_id, f"Unknown ({msg.user_id})")
-                timestamp = msg.timestamp.strftime("%H:%M:%S")
                 
-                msg_text = msg.text if msg.text is not None else "[No text content]"
-                f.write(f"{timestamp} - {sender}: {msg_text}\n")
+                message_data = {
+                    "timestamp": msg.timestamp.isoformat(),
+                    "sender": sender,
+                    "sender_id": msg.user_id,
+                    "text": msg.text,
+                    "message_id": getattr(msg, 'id', None)
+                }
                 
-                if msg.media and msg.media.media_type == 1:  # Image
-                    f.write(f"[Image: {msg.media.thumbnail_url}]\n")
-                elif msg.media and msg.media.media_type == 2:  # Video
-                    f.write(f"[Video: {msg.media.video_url}]\n")
+                # Add media information if present
+                try:
+                    if hasattr(msg, 'media') and msg.media and hasattr(msg.media, 'media_type'):
+                        message_data["media"] = {
+                            "type": "image" if msg.media.media_type == 1 else "video" if msg.media.media_type == 2 else "other",
+                            "thumbnail_url": getattr(msg.media, 'thumbnail_url', None),
+                            "video_url": getattr(msg.media, 'video_url', None) if msg.media.media_type == 2 else None
+                        }
+                except Exception:
+                    message_data["media"] = {"type": "unknown", "error": "Could not parse media data"}
                 
-                f.write("\n")
+                messages_data["messages"].append(message_data)
+            
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(messages_data, f, indent=2, ensure_ascii=False, default=str)
+        
+        elif file_format == "csv":
+            # CSV format
+            with open(filename, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                
+                # Write header
+                writer.writerow(["Timestamp", "Date", "Time", "Sender", "Sender_ID", "Message", "Media_Type", "Media_URL"])
+                
+                for msg in sorted_messages:
+                    sender = username_map.get(msg.user_id, f"Unknown ({msg.user_id})")
+                    
+                    media_type = ""
+                    media_url = ""
+                    try:
+                        if hasattr(msg, 'media') and msg.media and hasattr(msg.media, 'media_type'):
+                            if msg.media.media_type == 1:
+                                media_type = "Image"
+                                media_url = getattr(msg.media, 'thumbnail_url', "")
+                            elif msg.media.media_type == 2:
+                                media_type = "Video"
+                                media_url = getattr(msg.media, 'video_url', "")
+                    except Exception:
+                        media_type = "Unknown"
+                        media_url = "Error parsing media"
+                    
+                    writer.writerow([
+                        msg.timestamp.isoformat(),
+                        msg.timestamp.strftime("%Y-%m-%d"),
+                        msg.timestamp.strftime("%H:%M:%S"),
+                        sender,
+                        msg.user_id,
+                        msg.text or "[No text content]",
+                        media_type,
+                        media_url
+                    ])
                 
         return str(filename)
-        
     except Exception as e:
         console.print(f"[bold red]Error saving messages: {str(e)}[/bold red]")
         # Create a default fallback file in the user's home directory
         fallback_file = Path.home() / f"instagram_messages_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         try:
+            # Get current username for fallback
+            try:
+                current_user = client.user_info(client.user_id)
+                current_username = current_user.username
+            except:
+                current_username = "You"
+            
             with open(fallback_file, "w", encoding="utf-8") as f:
                 f.write(f"Conversation with {', '.join(usernames) if 'usernames' in locals() else 'unknown'}\n")
                 f.write("=" * 50 + "\n\n")
-                f.write(f"Error occurred while saving original file: {str(e)}\n")
+                f.write(f"Error occurred while saving original file: {str(e)}\n\n")
                 # Try to save at least some message content
                 if 'sorted_messages' in locals() and sorted_messages:
                     for msg in sorted_messages[:10]:  # Save at least first 10 messages
-                        f.write(f"{msg.timestamp.strftime('%H:%M:%S')} - {msg.text or '[No text content]'}\n\n")
+                        sender = current_username if msg.user_id == client.user_id else f"Other ({msg.user_id})"
+                        f.write(f"{msg.timestamp.strftime('%H:%M:%S')} - {sender}: {msg.text or '[No text content]'}\n\n")
             return str(fallback_file)
         except Exception as fallback_error:
             console.print(f"[bold red]Failed to save fallback file: {str(fallback_error)}[/bold red]")
@@ -557,7 +1059,7 @@ def configure_save_directory():
 
 def main() -> None:
     """Main function."""
-    console.print(Panel.fit("[bold cyan]Instagram DM Fetcher[/bold cyan]", subtitle="Fetch and save your Instagram DMs"))
+    console.print(Panel.fit("[bold cyan]Instagram DM Fetcher - Fixed Version[/bold cyan]", subtitle="Fetch and save your Instagram DMs with enhanced error handling"))
     
     setup_config_dir()
     
@@ -583,31 +1085,50 @@ def main() -> None:
                 client = login_to_instagram()
                 
                 while True:
-                    threads = get_conversations(client)
-                    thread = select_conversation(threads)
-                    
-                    count = Prompt.ask(
-                        "How many messages do you want to fetch?",
-                        default=str(DEFAULT_MESSAGE_COUNT)
-                    )
-                    
                     try:
-                        count = int(count)
-                        if count <= 0:
-                            raise ValueError("Count must be positive")
-                    except ValueError:
-                        console.print("[yellow]Invalid count. Using default value.[/yellow]")
-                        count = DEFAULT_MESSAGE_COUNT
-                    
-                    messages = fetch_messages(client, thread, count)
-                    display_messages(thread, messages, client.user_id)
-                    
-                    if Confirm.ask("Do you want to save these messages to a file?"):
-                        filename = save_messages_to_file(thread, messages, client.user_id)
-                        console.print(f"[green]Messages saved to {filename}[/green]")
-                    
-                    if not Confirm.ask("Do you want to fetch messages from another conversation?"):
-                        break
+                        threads = get_conversations(client)
+                        
+                        if not threads:
+                            console.print("[yellow]No conversations found or all conversations have problematic media.[/yellow]")
+                            break
+                        
+                        thread = select_conversation(threads)
+                        
+                        count = Prompt.ask(
+                            "How many messages do you want to fetch?",
+                            default=str(DEFAULT_MESSAGE_COUNT)
+                        )
+                        
+                        try:
+                            count = int(count)
+                            if count <= 0:
+                                raise ValueError("Count must be positive")
+                        except ValueError:
+                            console.print("[yellow]Invalid count. Using default value.[/yellow]")
+                            count = DEFAULT_MESSAGE_COUNT
+                        
+                        messages = fetch_messages(client, thread, count)
+                        
+                        if messages:
+                            display_messages(thread, messages, client)
+                            
+                            if Confirm.ask("Do you want to save these messages to a file?"):
+                                filename = save_messages_to_file(thread, messages, client)
+                                console.print(f"[green]Messages saved to {filename}[/green]")
+                        else:
+                            console.print("[yellow]No messages were retrieved.[/yellow]")
+                            console.print("[cyan]This might be due to problematic media in the conversation.[/cyan]")
+                            console.print("[cyan]Try selecting a different conversation or reducing the message count.[/cyan]")
+                        
+                        if not Confirm.ask("Do you want to fetch messages from another conversation?"):
+                            break
+                            
+                    except Exception as fetch_error:
+                        console.print(f"[red]Error during message fetching: {str(fetch_error)}[/red]")
+                        console.print("[yellow]This might be a temporary issue. Try again or select a different conversation.[/yellow]")
+                        
+                        if not Confirm.ask("Do you want to try again?"):
+                            break
             
             elif option == "2":
                 # Configure save directory

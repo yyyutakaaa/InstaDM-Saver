@@ -1059,7 +1059,7 @@ def configure_save_directory():
 
 def main() -> None:
     """Main function."""
-    console.print(Panel.fit("[bold cyan]Instagram DM Fetcher - Fixed Version[/bold cyan]", subtitle="Fetch and save your Instagram DMs with enhanced error handling"))
+    console.print(Panel.fit("[bold cyan]Instagram DM Fetcher - Fixed Version[/bold cyan]", subtitle="Fetch and save your Instagram DMs"))
     
     setup_config_dir()
     

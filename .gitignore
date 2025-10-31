@@ -1,34 +1,159 @@
-# Python virtual environments
-venv/
-.venv/
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
 
-# PyInstaller build output
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
 build/
+develop-eggs/
 dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
 *.spec
 build.log
 
-# __pycache__ en gecompileerde bestanden
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
 
-# VSCode settings (optioneel, handig als je met VSCode werkt)
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# IDEs
 .vscode/
-
-# IDE/project junk
+.idea/
 *.swp
 *.swo
+*.swn
 *.bak
+*~
 
-# OS/system files
+# OS files
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
 
-# Secret config (optioneel, als je lokaal tokens/tests hebt)
-.env
-*.env
+# Project specific - User Data & Config
+config/
+saved_messages/
+*.log
+session.json
+credentials.json
+credentials.enc
+.instagram_dm_fetcher/
+Instagram_DM_Fetcher_Chats/
 
-# Windows batch build file, als die niet op GitHub hoeft (optioneel)
-build_exe.bat
+# Old backup files (for migration)
+old_files_backup/
+
+# macOS specific
+.claude/
+
+# Temporary files
+*.tmp
+*.temp

@@ -199,6 +199,56 @@ class MessageManager:
         return cleaned
 
     @staticmethod
+    def _normalize_timestamp_value(value: Any) -> Any:
+        """
+        Normalize timestamp values that may come in microseconds/milliseconds.
+
+        Pydantic datetime parsing expects seconds; extremely large values blow
+        past the year-9999 limit. We progressively divide by 1000 to convert
+        milli/microsecond timestamps down to seconds.
+        """
+        try:
+            if isinstance(value, str) and value.isdigit():
+                value = int(value)
+
+            if isinstance(value, (int, float)):
+                limit_seconds = 253402300799  # datetime max supported (year 9999)
+                normalized = int(value)
+
+                # Convert large values (likely ms/us) down to seconds
+                for _ in range(2):  # at most microseconds -> divide twice
+                    if normalized <= limit_seconds:
+                        break
+                    normalized = int(normalized / 1000)
+
+                # If still too large, clamp to max supported to avoid crashes
+                if normalized > limit_seconds:
+                    return limit_seconds
+
+                return normalized
+        except Exception:
+            pass
+
+        return value
+
+    @staticmethod
+    def _normalize_timestamps(data: Any) -> Any:
+        """
+        Recursively normalize timestamp fields in a data structure.
+        """
+        if isinstance(data, dict):
+            for key, value in list(data.items()):
+                data[key] = MessageManager._normalize_timestamps(value)
+
+                if isinstance(data[key], (int, float, str)) and "timestamp" in key:
+                    data[key] = MessageManager._normalize_timestamp_value(data[key])
+
+        elif isinstance(data, list):
+            return [MessageManager._normalize_timestamps(item) for item in data]
+
+        return data
+
+    @staticmethod
     def _clean_media_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Clean problematic media data from message item.
@@ -214,6 +264,9 @@ class MessageManager:
 
         try:
             cleaned = copy.deepcopy(item)
+
+            # Normalize timestamps early to prevent Pydantic overflow errors
+            cleaned = MessageManager._normalize_timestamps(cleaned)
 
             # Handle clips/reels metadata
             if "clip" in cleaned:
@@ -312,6 +365,7 @@ class MessageManager:
                 error_str = str(e).lower()
                 is_media_error = any(keyword in error_str for keyword in [
                     "clips_metadata", "original_sound_info", "validationerror",
+                    "validation errors", "replymessage", "timestamp_us",
                     "model_type", "unexpected keyword argument"
                 ])
 

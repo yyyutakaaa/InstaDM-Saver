@@ -55,7 +55,6 @@ class InstagramAuthenticator:
 
         Raises:
             AuthenticationError: If login fails
-            TwoFactorRequired: If 2FA is required
         """
         self.client = Client()
 
@@ -63,31 +62,33 @@ class InstagramAuthenticator:
         session_file = self.config.get_session_file()
         if session_file.exists():
             try:
-                logger.info("Attempting to load saved session...")
-                self.client.load_settings(session_file)
+                # We use a simple status spinner here to avoid blocking UI perception
+                with console.status("[cyan]Loading saved session...[/cyan]"):
+                    logger.info("Attempting to load saved session...")
+                    self.client.load_settings(session_file)
 
-                # Get credentials for session validation
-                if not username or not password:
-                    creds = self.credential_manager.load_credentials()
-                    if creds:
-                        username = creds.get("username")
-                        password = creds.get("password")
+                    # Get credentials for session validation
+                    if not username or not password:
+                        creds = self.credential_manager.load_credentials()
+                        if creds:
+                            username = creds.get("username")
+                            password = creds.get("password")
 
-                if username and password:
-                    self.client.login(username, password)
-                    logger.info("Successfully loaded existing session")
-                    console.print("[green]Successfully loaded session.[/green]")
-                    return self.client
-                else:
-                    # Try to verify session without login
-                    self.client.get_timeline_feed()
-                    logger.info("Session is still valid")
-                    console.print("[green]Session is still valid.[/green]")
-                    return self.client
+                    if username and password:
+                        self.client.login(username, password)
+                        logger.info("Successfully loaded existing session")
+                        console.print("[green]Successfully loaded session.[/green]")
+                        return self.client
+                    else:
+                        # Try to verify session without login
+                        self.client.get_timeline_feed()
+                        logger.info("Session is still valid")
+                        console.print("[green]Session is still valid.[/green]")
+                        return self.client
 
             except Exception as e:
                 logger.warning(f"Failed to load saved session: {e}")
-                console.print(f"[yellow]Failed to load saved session: {e}[/yellow]")
+                console.print(f"[yellow]Failed to load saved session (will try fresh login): {e}[/yellow]")
                 # Continue with fresh login
 
         # Get credentials if not provided
@@ -95,45 +96,54 @@ class InstagramAuthenticator:
             creds = self._get_credentials()
             username = creds["username"]
             password = creds["password"]
+        
+        # Helper to perform the actual login call
+        def attempt_login(u, p, code=None):
+             with console.status("[cyan]Logging in to Instagram... (this may take a minute)[/cyan]", spinner="dots"):
+                if code:
+                    self.client.login(u, p, verification_code=code)
+                else:
+                    self.client.login(u, p)
 
         # Perform login
         try:
-            with Progress() as progress:
-                task = progress.add_task("[cyan]Logging in to Instagram...", total=1)
-
-                try:
-                    if verification_code:
-                        self.client.login(username, password, verification_code=verification_code)
-                    else:
-                        self.client.login(username, password)
-
-                except Exception as e:
-                    error_msg = str(e)
-                    if "two-factor authentication" in error_msg.lower() or "2fa" in error_msg.lower():
-                        progress.stop()
-                        logger.warning("Two-factor authentication required")
-                        raise TwoFactorRequired("Two-factor authentication required")
-                    else:
-                        raise e
-
-                progress.update(task, advance=1)
-
+            try:
+                attempt_login(username, password, verification_code)
+            except Exception as e:
+                error_msg = str(e)
+                if "two-factor authentication" in error_msg.lower() or "2fa" in error_msg.lower():
+                    logger.warning("Two-factor authentication required")
+                    console.print("[yellow]Two-factor authentication required[/yellow]")
+                    
+                    # Ask for code immediately
+                    code = Prompt.ask("Enter the verification code from your authenticator app")
+                    
+                    # Retry login with code
+                    attempt_login(username, password, code)
+                else:
+                    raise e
+            
             logger.info(f"Successfully logged in as {username}")
             console.print("[green]Login successful![/green]")
 
             # Save session
-            self.client.dump_settings(session_file)
-            logger.info(f"Session saved to {session_file}")
+            try:
+                self.client.dump_settings(session_file)
+                logger.info(f"Session saved to {session_file}")
+            except Exception as e:
+                logger.warning(f"Failed to save session file: {e}")
 
             # Save credentials if requested
             if save_credentials:
+                # auto-save if we looked them up, or ask?
+                # The original logic asked. Let's keep asking but maybe smarter.
+                # If we loaded from cred manager, no need to ask again unless changed?
+                # Simplifying: just ask if the user hasn't saved them before / manual entry
                 if Confirm.ask("Save credentials for future use?", default=True):
                     self.credential_manager.save_credentials(username, password)
 
             return self.client
 
-        except TwoFactorRequired:
-            raise
         except Exception as e:
             logger.error(f"Login failed: {e}")
             raise AuthenticationError(f"Login failed: {e}")

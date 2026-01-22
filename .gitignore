@@ -157,3 +157,6 @@ old_files_backup/
 # Temporary files
 *.tmp
 *.temp
+
+# Release folder
+InstaDM-Release/

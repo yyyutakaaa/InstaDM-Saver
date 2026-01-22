@@ -133,13 +133,7 @@ Fetch and save your Instagram DMs with:
             if not self.authenticator:
                 self.authenticator = InstagramAuthenticator(self.config)
 
-            try:
-                client = self.authenticator.login()
-            except TwoFactorRequired:
-                console.print("[yellow]Two-factor authentication required[/yellow]")
-                username = Prompt.ask("Enter your Instagram username")
-                password = Prompt.ask("Enter your Instagram password", password=True)
-                client = self.authenticator.login_with_2fa(username, password)
+            client = self.authenticator.login()
 
             self.message_manager = MessageManager(client)
 

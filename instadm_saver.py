@@ -372,6 +372,58 @@ def save_settings(settings):
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
 
+# A small pool of real, recent Android phones. We only set the hardware fields;
+# instagrapi fills in the current Instagram app version itself (and keeps it
+# fresh as the library updates), so the user agent always looks up to date.
+DEVICE_POOL = [
+    {"manufacturer": "samsung", "model": "SM-S918B", "device": "dm3q", "cpu": "qcom",
+     "android_release": "14", "android_version": 34, "dpi": "480dpi", "resolution": "1080x2340"},
+    {"manufacturer": "samsung", "model": "SM-S911B", "device": "dm1q", "cpu": "qcom",
+     "android_release": "14", "android_version": 34, "dpi": "480dpi", "resolution": "1080x2340"},
+    {"manufacturer": "Google/google", "model": "Pixel 7", "device": "panther", "cpu": "pantah",
+     "android_release": "14", "android_version": 34, "dpi": "420dpi", "resolution": "1080x2400"},
+    {"manufacturer": "Google/google", "model": "Pixel 8", "device": "shiba", "cpu": "shiba",
+     "android_release": "14", "android_version": 34, "dpi": "420dpi", "resolution": "1080x2400"},
+    {"manufacturer": "OnePlus", "model": "CPH2449", "device": "OP594DL1", "cpu": "qcom",
+     "android_release": "14", "android_version": 34, "dpi": "450dpi", "resolution": "1080x2412"},
+    {"manufacturer": "Xiaomi", "model": "23049PCD8G", "device": "fuxi", "cpu": "qcom",
+     "android_release": "14", "android_version": 34, "dpi": "440dpi", "resolution": "1080x2400"},
+]
+
+
+def ensure_identity(settings):
+    """Give this install one stable, realistic phone identity and reuse it forever.
+
+    Instagram distrusts logins that come from the library's shared default
+    device fingerprint (lots of tools send the exact same one), and answers
+    with confusing "incorrect password" or "please update the app" errors even
+    when the password is right. Generating our own device + ids once, then
+    sending the *same* ones every time, looks like a normal returning phone and
+    makes normal username + password login far more likely to go through.
+    """
+    if settings.get("device_settings") and settings.get("uuids"):
+        return settings["device_settings"], settings["uuids"]
+    import random
+    from instagrapi import Client
+    seed = Client()
+    seed.set_device(random.choice(DEVICE_POOL), reset=True)  # reset=True = fresh ids too
+    full = seed.get_settings()
+    settings["device_settings"] = full["device_settings"]
+    settings["uuids"] = full["uuids"]
+    save_settings(settings)
+    return settings["device_settings"], settings["uuids"]
+
+
+def apply_identity(client, settings):
+    """Put this install's saved phone identity on the client before logging in."""
+    device, uuids = ensure_identity(settings)
+    try:
+        client.set_device(device)   # also rebuilds a matching user agent
+        client.set_uuids(uuids)
+    except Exception:
+        pass  # never let identity setup block a login attempt
+
+
 def save_dir(settings):
     return Path(settings.get("save_dir") or DEFAULT_SAVE_DIR)
 
@@ -398,6 +450,65 @@ def media_info(msg):
 # Login
 # --------------------------------------------------------------------------
 
+def session_is_alive(client):
+    """True if the saved session still works.
+
+    Only a real "you are logged out" answer counts as dead. A rate limit, a
+    passing challenge or a network hiccup must NOT throw the session away and
+    force the user to paste their cookie again. We also use account_info()
+    here, not get_timeline_feed(): the timeline endpoint often refuses
+    cookie-based sessions even when they are perfectly usable, which is what
+    made every restart ask for the token again.
+    """
+    from instagrapi.exceptions import LoginRequired, ClientLoginRequired
+    try:
+        client.account_info()
+        return True
+    except (LoginRequired, ClientLoginRequired):
+        return False
+    except Exception:
+        return True  # transient — keep the session rather than nuke it
+
+
+def restore_session(client, settings):
+    """Get back in without bothering the user, if at all possible.
+
+    1. Reuse the full saved session file.
+    2. If that's stale, silently log in again with the browser cookie we saved
+       last time (this is the method that reliably works, so the user should
+       never have to paste it twice).
+
+    Returns the ready client, or None if the user must log in by hand.
+    """
+    # 1) Full saved session.
+    if SESSION_FILE.exists():
+        try:
+            with spinner("restoring your session"):
+                client.load_settings(SESSION_FILE)
+                alive = session_is_alive(client)
+            if alive:
+                say(f"welcome back, [bold]@{client.username}[/]", "ok")
+                return client
+        except Exception:
+            pass
+        client.set_settings({})
+
+    # 2) Silent re-login with the stored browser cookie.
+    sessionid = settings.get("sessionid")
+    if sessionid:
+        try:
+            with spinner("reusing your saved login"):
+                apply_identity(client, settings)
+                client.login_by_sessionid(sessionid)
+            client.dump_settings(SESSION_FILE)
+            say(f"welcome back, [bold]@{client.username}[/]", "ok")
+            return client
+        except Exception:
+            say("saved login expired, please log in again", "dim")
+
+    return None
+
+
 def login(state):
     from instagrapi import Client
     from instagrapi.exceptions import TwoFactorRequired
@@ -415,20 +526,15 @@ def login(state):
 
     client.challenge_code_handler = code_handler
 
-    # Reuse a saved session so you don't have to log in every time.
-    if SESSION_FILE.exists():
-        try:
-            with spinner("restoring your session"):
-                client.load_settings(SESSION_FILE)
-                client.get_timeline_feed()
-            say(f"welcome back, [bold]@{client.username}[/]", "ok")
-            return client
-        except Exception:
-            say("saved session expired, please log in again", "dim")
-            uuids = client.get_settings().get("uuids")
-            client.set_settings({})
-            if uuids:
-                client.set_uuids(uuids)
+    # Reuse a saved session, or silently re-use the stored cookie, so the user
+    # doesn't have to paste their token on every launch.
+    restored = restore_session(client, settings)
+    if restored is not None:
+        return restored
+
+    # Fresh login from a stable, realistic phone identity (see ensure_identity).
+    client.set_settings({})
+    apply_identity(client, settings)
 
     from rich.table import Table
     grid = Table.grid(padding=(0, 2))
@@ -450,9 +556,10 @@ def login(state):
             if not ask_yes("try logging in with a browser cookie instead?", True):
                 raise LoginCancelled()
             client = fresh_client(client)
-            username = cookie_login(client)
+            apply_identity(client, settings)
+            username = cookie_login(client, settings)
     else:
-        username = cookie_login(client)
+        username = cookie_login(client, settings)
 
     client.dump_settings(SESSION_FILE)
     settings["username"] = username
@@ -511,7 +618,7 @@ def password_login(client, settings, live, TwoFactorRequired):
     return username
 
 
-def cookie_login(client):
+def cookie_login(client, settings=None):
     from rich.text import Text
     steps = Text.assemble(
         ("Copy your login cookie from the browser\n\n", "bold white"),
@@ -537,6 +644,12 @@ def cookie_login(client):
         try:
             with spinner("checking your session"):
                 client.login_by_sessionid(sessionid)
+            # Remember the cookie so future launches reuse it silently instead
+            # of asking for it again (it's as sensitive as the session file,
+            # which already lives next to it in the same private folder).
+            if settings is not None:
+                settings["sessionid"] = sessionid
+                save_settings(settings)
             return client.username
         except Exception:
             say("Instagram didn't accept that sessionid. Copy it again, or leave empty to stop", "err")

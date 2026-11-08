@@ -914,29 +914,30 @@ def show_chat(client, thread, messages, last=12):
 # Export
 # --------------------------------------------------------------------------
 
-def export(client, thread, messages, fmt, folder):
+def render_conversation(client, thread, messages, fmt):
+    """Build the exported text for a conversation and return it as a string.
+
+    Kept separate from writing the file so the exact same output can also go
+    straight to the clipboard.
+    """
     names = name_map(client, thread)
     ordered = sorted(messages, key=lambda m: m.timestamp)
-    who = safe_filename(thread.users[0].username if thread.users else "unknown")
-    out_dir = folder / who
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{who}_{datetime.now():%Y-%m-%d_%H-%M-%S}.{fmt}"
 
     if fmt == "txt":
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(f"Conversation with {thread_name(thread)}\n{'=' * 70}\n")
-            current_day = None
-            for m in ordered:
-                if m.timestamp.date() != current_day:
-                    current_day = m.timestamp.date()
-                    f.write(f"\n{'-' * 20} {current_day:%A, %B %d, %Y} {'-' * 20}\n\n")
-                text = m.text if m.text is not None else "[no text]"
-                f.write(f"{m.timestamp:%H:%M:%S} - {sender_of(m, names)}: {text}\n")
-                kind, url = media_info(m)
-                if kind:
-                    f.write(f"  [{kind}: {url}]\n")
+        lines = [f"Conversation with {thread_name(thread)}", "=" * 70]
+        current_day = None
+        for m in ordered:
+            if m.timestamp.date() != current_day:
+                current_day = m.timestamp.date()
+                lines += ["", f"{'-' * 20} {current_day:%A, %B %d, %Y} {'-' * 20}", ""]
+            text = m.text if m.text is not None else "[no text]"
+            lines.append(f"{m.timestamp:%H:%M:%S} - {sender_of(m, names)}: {text}")
+            kind, url = media_info(m)
+            if kind:
+                lines.append(f"  [{kind}: {url}]")
+        return "\n".join(lines) + "\n"
 
-    elif fmt == "json":
+    if fmt == "json":
         data = {
             "conversation_info": {
                 "participants": [u.username for u in thread.users],
@@ -958,18 +959,97 @@ def export(client, thread, messages, fmt, folder):
             if kind:
                 entry["media"] = {"type": kind.lower(), "url": url}
             data["messages"].append(entry)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+        return json.dumps(data, indent=2, ensure_ascii=False, default=str)
 
-    else:  # csv
-        with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.writer(f)
-            w.writerow(["Timestamp", "Date", "Time", "Sender", "Sender_ID", "Message", "Media_Type", "Media_URL"])
-            for m in ordered:
-                kind, url = media_info(m)
-                w.writerow([m.timestamp.isoformat(), f"{m.timestamp:%Y-%m-%d}", f"{m.timestamp:%H:%M:%S}",
-                            sender_of(m, names), m.user_id, m.text or "", kind or "", url or ""])
+    # csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Timestamp", "Date", "Time", "Sender", "Sender_ID", "Message", "Media_Type", "Media_URL"])
+    for m in ordered:
+        kind, url = media_info(m)
+        w.writerow([m.timestamp.isoformat(), f"{m.timestamp:%Y-%m-%d}", f"{m.timestamp:%H:%M:%S}",
+                    sender_of(m, names), m.user_id, m.text or "", kind or "", url or ""])
+    return buf.getvalue()
+
+
+def export(client, thread, messages, fmt, folder):
+    who = safe_filename(thread.users[0].username if thread.users else "unknown")
+    out_dir = folder / who
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{who}_{datetime.now():%Y-%m-%d_%H-%M-%S}.{fmt}"
+    content = render_conversation(client, thread, messages, fmt)
+    # CSV gets a BOM so Excel opens it as UTF-8; the rest are plain UTF-8.
+    encoding = "utf-8-sig" if fmt == "csv" else "utf-8"
+    with open(path, "w", encoding=encoding, newline="") as f:
+        f.write(content)
     return path
+
+
+def copy_to_clipboard(text):
+    """Put text on the system clipboard without needing any extra library.
+
+    Uses the Win32 API on Windows (handles emoji and other unicode cleanly),
+    and pbcopy / wl-copy / xclip / xsel on macOS and Linux. Returns True on
+    success, False if no clipboard could be reached.
+    """
+    if os.name == "nt":
+        try:
+            return _win_set_clipboard(text)
+        except Exception:
+            return False
+    for cmd in (["pbcopy"], ["wl-copy"],
+                ["xclip", "-selection", "clipboard"],
+                ["xsel", "--clipboard", "--input"]):
+        try:
+            subprocess.run(cmd, input=text.encode("utf-8"), check=True)
+            return True
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+    return False
+
+
+def _win_set_clipboard(text):
+    import ctypes
+    from ctypes import wintypes
+    CF_UNICODETEXT, GMEM_MOVEABLE = 13, 0x0002
+    u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+    # Spell out the prototypes: without these, 64-bit handles get truncated to
+    # 32-bit ints and SetClipboardData silently fails.
+    u32.OpenClipboard.argtypes = [wintypes.HWND]
+    u32.OpenClipboard.restype = wintypes.BOOL
+    u32.EmptyClipboard.restype = wintypes.BOOL
+    u32.CloseClipboard.restype = wintypes.BOOL
+    u32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+    u32.SetClipboardData.restype = wintypes.HANDLE
+    k32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    k32.GlobalAlloc.restype = wintypes.HGLOBAL
+    k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    k32.GlobalLock.restype = ctypes.c_void_p
+    k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    k32.GlobalUnlock.restype = wintypes.BOOL
+    k32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+    k32.GlobalFree.restype = wintypes.HGLOBAL
+
+    data = text.encode("utf-16-le") + b"\x00\x00"
+    if not u32.OpenClipboard(None):
+        return False
+    try:
+        u32.EmptyClipboard()
+        handle = k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+        if not handle:
+            return False
+        ptr = k32.GlobalLock(handle)
+        ctypes.memmove(ptr, data, len(data))
+        k32.GlobalUnlock(handle)
+        if not u32.SetClipboardData(CF_UNICODETEXT, handle):
+            k32.GlobalFree(handle)
+            return False
+        return True  # on success Windows owns the memory; don't free it
+    finally:
+        u32.CloseClipboard()
 
 
 def pick_format():
@@ -985,6 +1065,24 @@ def pick_format():
     centered(panel(grid, title="save as", width=min(60, console.width - 4), padding=(1, 3)))
     console.print()
     return {"1": "txt", "2": "json", "3": "csv"}[ask_choice("format", ["1", "2", "3"], "1")]
+
+
+def pick_action():
+    """Ask what to do with the fetched messages: file, clipboard, both, or skip."""
+    from rich.table import Table
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column()
+    grid.add_column(style="bold white")
+    grid.add_column(style=MUTED)
+    grid.add_row(pill(1, PURPLE), "Save to file", "store it in your folder")
+    grid.add_row(pill(2, PINK), "Copy to clipboard", "paste it straight into a chat / doc")
+    grid.add_row(pill(3, ORANGE), "Both", "save it and copy it")
+    grid.add_row(pill(4, MUTED), "Skip", "don't keep it")
+    console.print()
+    centered(panel(grid, title="what now?", width=min(62, console.width - 4), padding=(1, 3)))
+    console.print()
+    return {"1": "file", "2": "clip", "3": "both", "4": "skip"}[
+        ask_choice("choose", ["1", "2", "3", "4"], "1")]
 
 
 def saved_box(path, count):
@@ -1023,11 +1121,21 @@ def fetch_flow(state):
             say("no messages could be retrieved from this chat", "err")
         else:
             show_chat(client, thread, messages)
-            if ask_yes("save these messages to a file?", True):
+            action = pick_action()
+            if action != "skip":
                 fmt = pick_format()
-                with spinner("writing file"):
-                    path = export(client, thread, messages, fmt, save_dir(state["settings"]))
-                saved_box(path, len(messages))
+                if action in ("file", "both"):
+                    with spinner("writing file"):
+                        path = export(client, thread, messages, fmt, save_dir(state["settings"]))
+                    saved_box(path, len(messages))
+                if action in ("clip", "both"):
+                    text = render_conversation(client, thread, messages, fmt)
+                    if copy_to_clipboard(text):
+                        say(f"copied {len(messages):,} messages ({fmt}) to your clipboard", "ok")
+                    else:
+                        say("couldn't reach the clipboard on this system — the file still saved"
+                            if action == "both" else
+                            "couldn't reach the clipboard on this system", "err")
 
         if not ask_yes("open another chat?", False):
             return
